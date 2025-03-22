@@ -1,0 +1,352 @@
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def hidden_init(layer):
+    """
+    Inizializza i pesi del layer in base al numero di input (fan_in)
+    usando un intervallo uniforme: (-1/sqrt(fan_in), 1/sqrt(fan_in)).
+    """
+    fan_in = layer.weight.data.size()[1]
+    lim = 1.0 / np.sqrt(fan_in)
+    return (-lim, lim)
+
+class PortfolioActor(nn.Module):
+    """
+    Rete neurale per la policy (Actor) adattata per portafogli multi-asset.
+
+    Input:
+      - state: vettore di stato che include feature di ogni asset, posizioni attuali e metriche di portafoglio.
+
+    Output:
+      - Azioni: vettore di azioni, una per ogni asset nel portafoglio.
+    """
+    def __init__(self, state_size, action_size, seed=0, fc1_units=256, fc2_units=128, fc3_units=64, use_batch_norm=True):
+        """
+        Inizializza la rete dell'Actor.
+        
+        Parametri:
+        - state_size: dimensione dello stato (feature di tutti gli asset + posizioni + metriche)
+        - action_size: numero di asset nel portafoglio (un'azione per asset)
+        - seed: seme per riproducibilità
+        - fc1_units, fc2_units, fc3_units: dimensioni dei layer nascosti
+        - use_batch_norm: se utilizzare la batch normalization
+        """
+        super(PortfolioActor, self).__init__()
+        self.seed = torch.manual_seed(seed)
+        self.use_batch_norm = use_batch_norm
+        
+        # Layer lineari
+        self.fc1 = nn.Linear(state_size, fc1_units)
+        self.fc2 = nn.Linear(fc1_units, fc2_units)
+        self.fc3 = nn.Linear(fc2_units, fc3_units)
+        self.fc4 = nn.Linear(fc3_units, action_size)
+        
+        # Batch normalization (opzionale)
+        if use_batch_norm:
+            self.bn1 = nn.BatchNorm1d(fc1_units)
+            self.bn2 = nn.BatchNorm1d(fc2_units)
+            self.bn3 = nn.BatchNorm1d(fc3_units)
+        
+        # Inizializza i parametri
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        """
+        Inizializza i pesi dei layer con valori appropriati.
+        """
+        self.fc1.weight.data.uniform_(*hidden_init(self.fc1))
+        self.fc1.bias.data.fill_(0)
+        self.fc2.weight.data.uniform_(*hidden_init(self.fc2))
+        self.fc2.bias.data.fill_(0)
+        self.fc3.weight.data.uniform_(*hidden_init(self.fc3))
+        self.fc3.bias.data.fill_(0)
+        # Il layer finale viene inizializzato con valori più piccoli
+        self.fc4.weight.data.uniform_(-3e-4, 3e-4)
+        self.fc4.bias.data.fill_(0)
+    
+    def forward(self, state):
+        """
+        Esegue il forward pass dell'Actor.
+        
+        Args:
+            state (Tensor): input dello stato.
+            
+        Returns:
+            Tensor: vettore di azioni calcolate (una per asset).
+        """
+        # Applica i layer con attivazioni e batch norm (se abilitata)
+        if self.use_batch_norm:
+            x = F.relu(self.bn1(self.fc1(state)))
+            x = F.relu(self.bn2(self.fc2(x)))
+            x = F.relu(self.bn3(self.fc3(x)))
+        else:
+            x = F.relu(self.fc1(state))
+            x = F.relu(self.fc2(x))
+            x = F.relu(self.fc3(x))
+        
+        # Layer di output (no attivazione; vogliamo azioni che possono essere positive e negative)
+        return self.fc4(x)
+    
+class PortfolioCritic(nn.Module):
+    """
+    Rete neurale per il Critic adattata per portafogli multi-asset.
+    
+    Input:
+      - state: vettore di stato che include feature di ogni asset, posizioni e metriche
+      - action: vettore di azioni, una per ogni asset
+      
+    Output:
+      - Valore Q: singolo valore che rappresenta il valore stimato dell'azione
+    """
+    def __init__(self, state_size, action_size, seed=0, fcs1_units=256, fc2_units=128, fc3_units=64, use_batch_norm=True):
+        """
+        Inizializza la rete del Critic.
+        
+        Parametri:
+        - state_size: dimensione dello stato
+        - action_size: numero di asset nel portafoglio
+        - seed: seme per riproducibilità
+        - fcs1_units, fc2_units, fc3_units: dimensioni dei layer nascosti
+        - use_batch_norm: se utilizzare la batch normalization
+        """
+        super(PortfolioCritic, self).__init__()
+        self.seed = torch.manual_seed(seed)
+        self.use_batch_norm = use_batch_norm
+        
+        # Layer per elaborare lo stato e l'azione
+        self.fcs1 = nn.Linear(state_size + action_size, fcs1_units)
+        self.fc2 = nn.Linear(fcs1_units, fc2_units)
+        self.fc3 = nn.Linear(fc2_units, fc3_units)
+        self.fc4 = nn.Linear(fc3_units, 1)
+        
+        # Batch normalization (opzionale)
+        if use_batch_norm:
+            self.bn1 = nn.BatchNorm1d(fcs1_units)
+            self.bn2 = nn.BatchNorm1d(fc2_units)
+            self.bn3 = nn.BatchNorm1d(fc3_units)
+        
+        # Inizializza i parametri
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        """
+        Inizializza i pesi dei layer con valori appropriati.
+        """
+        self.fcs1.weight.data.uniform_(*hidden_init(self.fcs1))
+        self.fcs1.bias.data.fill_(0)
+        self.fc2.weight.data.uniform_(*hidden_init(self.fc2))
+        self.fc2.bias.data.fill_(0)
+        self.fc3.weight.data.uniform_(*hidden_init(self.fc3))
+        self.fc3.bias.data.fill_(0)
+        # Il layer finale viene inizializzato con valori più piccoli
+        self.fc4.weight.data.uniform_(-3e-4, 3e-4)
+        self.fc4.bias.data.fill_(0)
+    
+    def forward(self, state, action):
+        """
+        Esegue il forward pass del Critic.
+        
+        Args:
+            state (Tensor): vettore di stato
+            action (Tensor): vettore di azioni
+            
+        Returns:
+            Tensor: il valore Q della coppia (stato, azioni)
+        """
+        # Concatena stato e azione
+        x = torch.cat((state, action), dim=1)
+        
+        # Applica i layer con attivazioni e batch norm (se abilitata)
+        if self.use_batch_norm:
+            x = F.relu(self.bn1(self.fcs1(x)))
+            x = F.relu(self.bn2(self.fc2(x)))
+            x = F.relu(self.bn3(self.fc3(x)))
+        else:
+            x = F.relu(self.fcs1(x))
+            x = F.relu(self.fc2(x))
+            x = F.relu(self.fc3(x))
+        
+        # Layer di output (singolo valore Q)
+        return self.fc4(x)
+
+class AssetEncoder(nn.Module):
+    """
+    Modulo opzionale per codificare le feature di ciascun asset in modo indipendente.
+    Questo permette di processare ogni asset con gli stessi pesi prima di combinarli.
+    
+    Utile per portafogli con molti asset dove il numero di parametri totali crescerebbe troppo.
+    """
+    def __init__(self, features_per_asset, encoding_size=16, seed=0):
+        """
+        Inizializza il codificatore di asset.
+        
+        Parametri:
+        - features_per_asset: numero di feature per singolo asset
+        - encoding_size: dimensione dell'encoding per asset
+        - seed: seme per riproducibilità
+        """
+        super(AssetEncoder, self).__init__()
+        self.seed = torch.manual_seed(seed)
+        self.features_per_asset = features_per_asset
+        self.encoding_size = encoding_size
+        
+        # Layer di encoding
+        self.fc1 = nn.Linear(features_per_asset, 32)
+        self.fc2 = nn.Linear(32, encoding_size)
+        
+        # Inizializza i parametri
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        """
+        Inizializza i pesi dei layer con valori appropriati.
+        """
+        self.fc1.weight.data.uniform_(*hidden_init(self.fc1))
+        self.fc1.bias.data.fill_(0)
+        self.fc2.weight.data.uniform_(*hidden_init(self.fc2))
+        self.fc2.bias.data.fill_(0)
+    
+    def forward(self, state, num_assets):
+        """
+        Codifica le feature di ciascun asset indipendentemente.
+        
+        Args:
+            state (Tensor): stato completo [batch_size, features_per_asset*num_assets + extra]
+            num_assets: numero di asset nel portafoglio
+            
+        Returns:
+            Tensor: feature codificate [batch_size, num_assets*encoding_size + extra]
+        """
+        batch_size = state.size(0)
+        
+        # Estrai le feature di ciascun asset
+        asset_features = state[:, :num_assets*self.features_per_asset]
+        
+        # Riorganizza per processare ogni asset indipendentemente
+        asset_features = asset_features.view(batch_size, num_assets, self.features_per_asset)
+        
+        # Codifica ogni asset
+        x = F.relu(self.fc1(asset_features))
+        asset_encodings = F.relu(self.fc2(x))
+        
+        # Appiattisci gli encoding
+        asset_encodings = asset_encodings.view(batch_size, num_assets * self.encoding_size)
+        
+        # Se ci sono feature aggiuntive nello stato originale, concatenale agli encoding
+        if state.size(1) > num_assets * self.features_per_asset:
+            extra_features = state[:, num_assets*self.features_per_asset:]
+            return torch.cat((asset_encodings, extra_features), dim=1)
+        
+        return asset_encodings
+
+class EnhancedPortfolioActor(nn.Module):
+    """
+    Versione avanzata dell'Actor che utilizza un encoder per asset e meccanismi di attenzione.
+    Adatta per portafogli con molti asset e relazioni complesse.
+    """
+    def __init__(self, state_size, action_size, features_per_asset, seed=0, 
+                 fc1_units=256, fc2_units=128, encoding_size=16, use_attention=True):
+        """
+        Inizializza l'Actor avanzato.
+        
+        Parametri:
+        - state_size: dimensione dello stato completo
+        - action_size: numero di asset nel portafoglio
+        - features_per_asset: feature per singolo asset
+        - seed: seme per riproducibilità
+        - fc1_units, fc2_units: dimensioni dei layer nascosti
+        - encoding_size: dimensione dell'encoding per asset
+        - use_attention: se utilizzare meccanismi di attenzione
+        """
+        super(EnhancedPortfolioActor, self).__init__()
+        self.seed = torch.manual_seed(seed)
+        self.action_size = action_size
+        
+        # Encoder per asset
+        self.asset_encoder = AssetEncoder(features_per_asset, encoding_size, seed)
+        
+        # Extra feature (posizioni attuali + metriche portafoglio)
+        extra_features = state_size - (features_per_asset * action_size)
+        encoded_size = (action_size * encoding_size) + extra_features
+        
+        # Layer principali
+        self.fc1 = nn.Linear(encoded_size, fc1_units)
+        self.fc2 = nn.Linear(fc1_units, fc2_units)
+        self.fc3 = nn.Linear(fc2_units, action_size)
+        
+        # Layer di attenzione per modellare relazioni tra asset
+        self.use_attention = use_attention
+        if use_attention:
+            self.attention = nn.Linear(encoding_size, 1)
+            self.value = nn.Linear(encoding_size, encoding_size)
+        
+        # Batch normalization
+        self.bn1 = nn.BatchNorm1d(fc1_units)
+        self.bn2 = nn.BatchNorm1d(fc2_units)
+        
+        # Inizializza i parametri
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        """
+        Inizializza i pesi dei layer con valori appropriati.
+        """
+        self.fc1.weight.data.uniform_(*hidden_init(self.fc1))
+        self.fc1.bias.data.fill_(0)
+        self.fc2.weight.data.uniform_(*hidden_init(self.fc2))
+        self.fc2.bias.data.fill_(0)
+        self.fc3.weight.data.uniform_(-3e-4, 3e-4)
+        self.fc3.bias.data.fill_(0)
+        
+        if self.use_attention:
+            self.attention.weight.data.uniform_(*hidden_init(self.attention))
+            self.attention.bias.data.fill_(0)
+            self.value.weight.data.uniform_(*hidden_init(self.value))
+            self.value.bias.data.fill_(0)
+    
+    def apply_attention(self, encoded_assets, batch_size):
+        """
+        Applica meccanismo di attenzione tra asset.
+        """
+        # Riorganizza per processare attenzione tra asset
+        encoding_size = encoded_assets.size(1) // self.action_size
+        assets = encoded_assets.view(batch_size, self.action_size, encoding_size)
+        
+        # Calcola punteggi di attenzione
+        attention_scores = self.attention(assets).squeeze(-1)
+        attention_weights = F.softmax(attention_scores, dim=1).unsqueeze(-1)
+        
+        # Trasforma gli asset
+        values = self.value(assets)
+        
+        # Applica attenzione
+        context = (attention_weights * values).sum(dim=1)
+        
+        # Espandi il contesto e concatena con gli encoding originali
+        context_expanded = context.unsqueeze(1).expand(-1, self.action_size, -1)
+        enhanced_assets = torch.cat((assets, context_expanded), dim=2).view(batch_size, -1)
+        
+        return enhanced_assets
+    
+    def forward(self, state):
+        """
+        Forward pass dell'Actor avanzato.
+        """
+        batch_size = state.size(0)
+        features_per_asset = (state.size(1) - (state.size(1) % self.action_size)) // self.action_size
+        
+        # Codifica gli asset
+        encoded_state = self.asset_encoder(state, self.action_size)
+        
+        # Applica attenzione se abilitata
+        if self.use_attention:
+            encoded_state = self.apply_attention(encoded_state, batch_size)
+        
+        # Feed-forward con batch norm
+        x = F.relu(self.bn1(self.fc1(encoded_state)))
+        x = F.relu(self.bn2(self.fc2(x)))
+        
+        # Output layer
+        return self.fc3(x)
