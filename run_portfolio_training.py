@@ -11,6 +11,9 @@ from portfolio_agent import PortfolioAgent
 from portfolio_env import PortfolioEnvironment
 from portfolio_models import PortfolioActor, PortfolioCritic, EnhancedPortfolioActor
 
+
+#py run_portfolio_training.py --resume="results\portfolio\weights\checkpoint_ep0.pt"
+
 # Lista dei ticker da utilizzare nel portafoglio
 TICKERS = ["ARKG", "IBB", "IHI", "IYH", "XBI", "VHT"]
 
@@ -31,7 +34,8 @@ os.makedirs(f'{OUTPUT_DIR}\\analysis', exist_ok=True)
 # Sostituire la lista norm_columns attuale (circa alla riga 36-51) con questa:
 norm_columns = [
     "open", "volume", "change", "day", "week", "adjCloseGold", "adjCloseSpy",
-    "Credit_Spread", "Log_Close", "m_plus", "m_minus", "drawdown", "drawup",
+    "Credit_Spread", #"Log_Close",
+    "m_plus", "m_minus", "drawdown", "drawup",
     "s_plus", "s_minus", "upper_bound", "lower_bound", "avg_duration", "avg_depth",
     "cdar_95", "VIX_Close", "MACD", "MACD_Signal", "MACD_Histogram", "SMA5",
     "SMA10", "SMA15", "SMA20", "SMA25", "SMA30", "SMA36", "RSI5", "RSI14", "RSI20",
@@ -106,28 +110,42 @@ def load_data_for_tickers(tickers, train_fraction=0.8):
     # Aggiorna la lista dei ticker con quelli validi
     return dfs_train, dfs_test, norm_params_paths, valid_tickers
 
+# Modifica la funzione save_results in run_portfolio_training.py
 def save_results(results, output_dir, tickers):
     """Salva i risultati dell'addestramento."""
-    # Crea un DataFrame con i risultati
-    results_df = pd.DataFrame({
-        'ticker': tickers,
-        'final_reward': [np.mean(results['final_rewards'][-3:])],
-        'final_portfolio_value': [np.mean(results['final_portfolio_values'][-3:])],
-        'final_sharpe_ratio': [np.mean(results['final_sharpe_ratios'][-3:])],
-        'training_timestamp': [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
-    })
-    
-    # Salva il DataFrame
-    results_file = f'{output_dir}\training_results.csv'
-    # Aggiungi i risultati a un file esistente o creane uno nuovo
-    if os.path.exists(results_file):
-        existing_results = pd.read_csv(results_file)
-        updated_results = pd.concat([existing_results, results_df], ignore_index=True)
-        updated_results.to_csv(results_file, index=False)
-    else:
-        results_df.to_csv(results_file, index=False)
-    
-    print(f"Risultati salvati in: {results_file}")
+    try:
+        # Estrai in modo sicuro le metriche finali
+        final_reward = np.mean(list(results['final_rewards'])[-3:]) if len(results['final_rewards']) >= 3 else np.mean(list(results['final_rewards']))
+        final_portfolio_value = np.mean(list(results['final_portfolio_values'])[-3:]) if len(results['final_portfolio_values']) >= 3 else np.mean(list(results['final_portfolio_values']))
+        final_sharpe_ratio = np.mean(list(results['final_sharpe_ratios'])[-3:]) if len(results['final_sharpe_ratios']) >= 3 else np.mean(list(results['final_sharpe_ratios']))
+        
+        # Crea DataFrame
+        results_df = pd.DataFrame({
+            'ticker': tickers,
+            'final_reward': [final_reward],
+            'final_portfolio_value': [final_portfolio_value],
+            'final_sharpe_ratio': [final_sharpe_ratio],
+            'training_timestamp': [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
+        })
+        
+        # Salva il DataFrame
+        results_file = f'{output_dir}\\training_results.csv'
+        # Aggiungi i risultati a un file esistente o creane uno nuovo
+        if os.path.exists(results_file):
+            existing_results = pd.read_csv(results_file)
+            updated_results = pd.concat([existing_results, results_df], ignore_index=True)
+            updated_results.to_csv(results_file, index=False)
+        else:
+            results_df.to_csv(results_file, index=False)
+        
+        print(f"Risultati salvati in: {results_file}")
+    except Exception as e:
+        print(f"Errore durante il salvataggio dei risultati: {e}")
+        # Salva i dati grezzi in formato pickle per analisi successiva
+        import pickle
+        with open(f'{output_dir}\\raw_results.pkl', 'wb') as f:
+            pickle.dump(results, f)
+        print(f"Risultati grezzi salvati in: {output_dir}\\raw_results.pkl")
 
 def plot_training_performance(results, output_dir, tickers):
     """Crea grafici per visualizzare le performance di addestramento."""
@@ -167,36 +185,78 @@ def plot_training_performance(results, output_dir, tickers):
     print(f"Grafico delle performance salvato in: {output_dir}\\training_performance.png")
 
 def align_dataframes(dfs):
-    """
-    Allinea i DataFrame in modo che abbiano lo stesso intervallo di date.
-    Riempie eventuali valori mancanti usando forward fill.
-    """
-    aligned_dfs = {}
-    
-    # Trova l'intervallo di date comune
-    if all('date' in df.columns for df in dfs.values()):
-        # Trova la data di inizio più recente
-        start_date = max(df['date'].min() for df in dfs.values())
-        # Trova la data di fine più vecchia
-        end_date = min(df['date'].max() for df in dfs.values())
+        """
+        Allinea i DataFrame in modo che abbiano lo stesso intervallo di date 
+        e lo stesso numero di righe.
+        """
+        aligned_dfs = {}
         
-        print(f"Intervallo di date comune: {start_date} - {end_date}")
+        # Trova l'intervallo di date comune
+        if all('date' in df.columns for df in dfs.values()):
+            # Trova la data di inizio più recente
+            start_date = max(df['date'].min() for df in dfs.values())
+            # Trova la data di fine più vecchia
+            end_date = min(df['date'].max() for df in dfs.values())
+            
+            print(f"Intervallo di date comune: {start_date} - {end_date}")
+            
+            # Filtra e allinea ogni DataFrame
+            for ticker, df in dfs.items():
+                aligned_df = df[(df['date'] >= start_date) & (df['date'] <= end_date)].copy()
+                # Assicurati che le date siano ordinate
+                aligned_df = aligned_df.sort_values('date')
+                aligned_dfs[ticker] = aligned_df
+            
+            # Verifica che tutti i DataFrame allineati abbiano lo stesso numero di righe
+            lengths = [len(df) for df in aligned_dfs.values()]
+            if len(set(lengths)) > 1:
+                print(f"ATTENZIONE: I DataFrame allineati hanno lunghezze diverse: {lengths}")
+                # Trova la lunghezza minima
+                min_length = min(lengths)
+                print(f"Troncamento a {min_length} righe...")
+                # Tronca tutti i DataFrame alla stessa lunghezza
+                for ticker in aligned_dfs:
+                    aligned_dfs[ticker] = aligned_dfs[ticker].iloc[:min_length].copy()
+        else:
+            # Se non ci sono colonne 'date', usa il numero minimo di righe
+            min_rows = min(len(df) for df in dfs.values())
+            for ticker, df in dfs.items():
+                aligned_dfs[ticker] = df.iloc[:min_rows].copy()
         
-        # Filtra e allinea ogni DataFrame
-        for ticker, df in dfs.items():
-            aligned_df = df[(df['date'] >= start_date) & (df['date'] <= end_date)].copy()
-            # Assicurati che le date siano ordinate
-            aligned_df = aligned_df.sort_values('date')
-            aligned_dfs[ticker] = aligned_df
-    else:
-        # Se non ci sono colonne 'date', usa il numero minimo di righe
-        min_rows = min(len(df) for df in dfs.values())
-        for ticker, df in dfs.items():
-            aligned_dfs[ticker] = df.iloc[:min_rows].copy()
+        # Verifica finale delle lunghezze
+        lengths = [len(df) for df in aligned_dfs.values()]
+        print(f"Lunghezze dei DataFrame allineati: {lengths}")
+        
+        return aligned_dfs
+def diagnose_missing_columns(df, ticker, required_columns):
+    """
+    Diagnostica dettagliata delle colonne mancanti in un DataFrame.
     
-    return aligned_dfs
+    Parametri:
+    - df: DataFrame da analizzare
+    - ticker: nome del ticker per riferimento
+    - required_columns: lista di colonne richieste
+    
+    Ritorna:
+    - True se tutte le colonne sono presenti, False altrimenti
+    """
+    missing_cols = [col for col in required_columns if col not in df.columns]
+    
+    if missing_cols:
+        print(f"Ticker {ticker} manca di {len(missing_cols)}/{len(required_columns)} colonne richieste:")
+        print(f"Colonne mancanti: {missing_cols}")
+        
+        # Verifica se ci sono colonne simili che potrebbero essere rinominate
+        for missing in missing_cols:
+            similar_cols = [col for col in df.columns if missing.lower() in col.lower()]
+            if similar_cols:
+                print(f"  Per '{missing}' ci sono colonne simili: {similar_cols}")
+        
+        return False
+    
+    return True
 
-def main():
+def main(resume_from=None):
     """Funzione principale per l'addestramento del portafoglio."""
     # 1. Carica e prepara i dati
     print("Caricamento dei dati per tutti i ticker...")
@@ -216,6 +276,8 @@ def main():
     # Salva i DataFrame allineati per riferimento futuro
     for ticker, df in aligned_dfs_test.items():
         df.to_csv(f'{OUTPUT_DIR}\\test\\{ticker}_test_aligned.csv', index=False)
+        # Nel ciclo che carica i dati per ogni ticker
+        diagnose_missing_columns(df, ticker, norm_columns)
     
     # 2. Crea l'ambiente di portafoglio
     print("Inizializzazione dell'ambiente di portafoglio...")
@@ -295,6 +357,9 @@ def main():
         decay_rate=5e-7,             # Decay esplorazione più lento
         explore_stop=0.1,
         tensordir=f'{OUTPUT_DIR}\\runs\\',
+        checkpoint_freq=10,          # Salva checkpoint ogni 10 episodi
+        checkpoint_path=f'{OUTPUT_DIR}\\weights\\',
+        resume_from=None,            # Imposta a un percorso specifico se vuoi riprendere
         learn_freq=5,                # Aggiornamento più frequente
         plots=False,
         progress="tqdm",
@@ -381,4 +446,9 @@ def main():
         print("Nessun modello trovato per la valutazione.")
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description='Addestra il portafoglio con RL')
+    parser.add_argument('--resume', type=str, help='Percorso del checkpoint da cui riprendere')
+    args = parser.parse_args()
+    
+    main(resume_from=args.resume)

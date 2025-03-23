@@ -68,26 +68,38 @@ class PortfolioActor(nn.Module):
     
     def forward(self, state):
         """
-        Esegue il forward pass dell'Actor.
-        
-        Args:
-            state (Tensor): input dello stato.
-            
-        Returns:
-            Tensor: vettore di azioni calcolate (una per asset).
+        Forward pass dell'Actor avanzato.
         """
-        # Applica i layer con attivazioni e batch norm (se abilitata)
-        if self.use_batch_norm:
-            x = F.relu(self.bn1(self.fc1(state)))
-            x = F.relu(self.bn2(self.fc2(x)))
-            x = F.relu(self.bn3(self.fc3(x)))
-        else:
-            x = F.relu(self.fc1(state))
-            x = F.relu(self.fc2(x))
-            x = F.relu(self.fc3(x))
+        batch_size = state.size(0)
+        features_per_asset = (state.size(1) - (state.size(1) % self.action_size)) // self.action_size
         
-        # Layer di output (no attivazione; vogliamo azioni che possono essere positive e negative)
-        return self.fc4(x)
+        # Codifica gli asset
+        encoded_state = self.asset_encoder(state, self.action_size)
+        
+        # Applica attenzione se abilitata
+        if self.use_attention:
+            encoded_state = self.apply_attention(encoded_state, batch_size)
+        
+        # Debug della dimensione
+        #print(f"DEBUG - encoded_state shape dopo attenzione: {encoded_state.shape}, fc1 weight shape: {self.fc1.weight.shape}")
+        
+        # Adatta dinamicamente il layer FC1 se necessario
+        if self.fc1.weight.shape[1] != encoded_state.size(1):
+            print(f"ATTENZIONE: Ridimensionamento del layer FC1 da {self.fc1.weight.shape[1]} a {encoded_state.size(1)}")
+            old_fc1_out_features = self.fc1.weight.shape[0]
+            self.fc1 = torch.nn.Linear(encoded_state.size(1), old_fc1_out_features)
+            # Reinizializza i pesi
+            fan_in = self.fc1.weight.data.size()[1]
+            lim = 1.0 / np.sqrt(fan_in)
+            self.fc1.weight.data.uniform_(-lim, lim)
+            self.fc1.bias.data.fill_(0)
+        
+        # Feed-forward con batch norm
+        x = F.relu(self.bn1(self.fc1(encoded_state)))
+        x = F.relu(self.bn2(self.fc2(x)))
+        
+        # Output layer
+        return self.fc3(x)
     
 class PortfolioCritic(nn.Module):
     """
@@ -247,7 +259,7 @@ class EnhancedPortfolioActor(nn.Module):
     Adatta per portafogli con molti asset e relazioni complesse.
     """
     def __init__(self, state_size, action_size, features_per_asset, seed=0, 
-                 fc1_units=256, fc2_units=128, encoding_size=16, use_attention=True):
+             fc1_units=256, fc2_units=128, encoding_size=16, use_attention=True):
         """
         Inizializza l'Actor avanzato.
         
@@ -263,13 +275,26 @@ class EnhancedPortfolioActor(nn.Module):
         super(EnhancedPortfolioActor, self).__init__()
         self.seed = torch.manual_seed(seed)
         self.action_size = action_size
+        self.features_per_asset = features_per_asset
+        self.encoding_size = encoding_size
         
         # Encoder per asset
         self.asset_encoder = AssetEncoder(features_per_asset, encoding_size, seed)
         
         # Extra feature (posizioni attuali + metriche portafoglio)
         extra_features = state_size - (features_per_asset * action_size)
-        encoded_size = (action_size * encoding_size) + extra_features
+        
+        # Calcola dimensione dell'input per FC1, considerando l'effetto dell'attenzione
+        if use_attention:
+            # Quando si usa l'attenzione, ogni asset avrà le sue feature originali + il contesto
+            encoded_size = (action_size * encoding_size * 2) + extra_features
+        else:
+            encoded_size = (action_size * encoding_size) + extra_features
+        
+        #print(f"DEBUG - EnhancedPortfolioActor init:")
+        #print(f"  state_size: {state_size}, action_size: {action_size}, features_per_asset: {features_per_asset}")
+        #print(f"  extra_features: {extra_features}, encoding_size: {encoding_size}")
+        #print(f"  encoded_size (input per FC1): {encoded_size}")
         
         # Layer principali
         self.fc1 = nn.Linear(encoded_size, fc1_units)
@@ -310,15 +335,78 @@ class EnhancedPortfolioActor(nn.Module):
         """
         Applica meccanismo di attenzione tra asset.
         """
-        # Riorganizza per processare attenzione tra asset
-        encoding_size = encoded_assets.size(1) // self.action_size
-        assets = encoded_assets.view(batch_size, self.action_size, encoding_size)
+        # Controlla le dimensioni effettive
+        total_size = encoded_assets.size(1)
+        
+        # Debug informazioni
+        #print(f"DEBUG - apply_attention: total_size={total_size}, action_size={self.action_size}")
+        
+        # Verifica che la divisione sia esatta
+        if total_size % self.action_size != 0:
+            #print(f"ATTENZIONE: Dimensione encoding non divisibile: {total_size} / {self.action_size}")
+            encoding_size = total_size // self.action_size
+            remainder = total_size % self.action_size
+            
+            # Aggiungi padding se necessario
+            if remainder > 0:
+                encoding_size += 1
+                padding_needed = encoding_size * self.action_size - total_size
+                padding = torch.zeros(batch_size, padding_needed, device=encoded_assets.device)
+                encoded_assets = torch.cat([encoded_assets, padding], dim=1)
+                #print(f"Aggiunto padding: nuovo encoding_size = {encoding_size}, nuova dimensione = {encoded_assets.size(1)}")
+        else:
+            # Calcola normalmente se divisibile
+            encoding_size = total_size // self.action_size
+        
+        # Riorganizza in [batch, num_assets, features_per_asset]
+        try:
+            assets = encoded_assets.view(batch_size, self.action_size, encoding_size)
+            #print(f"Reshape riuscito: assets.shape={assets.shape}")
+        except RuntimeError as e:
+            print(f"Errore nel reshape: encoded_assets.shape={encoded_assets.shape}, batch_size={batch_size}, action_size={self.action_size}, encoding_size={encoding_size}")
+            print(f"Totale elementi: {encoded_assets.numel()}, target: {batch_size * self.action_size * encoding_size}")
+            
+            # Fallback: ricalcola una dimensione sicura
+            safe_encoding_size = encoded_assets.numel() // (batch_size * self.action_size)
+            print(f"Tentativo con encoding_size sicuro: {safe_encoding_size}")
+            
+            # Aggiungi padding se necessario
+            if encoded_assets.numel() < batch_size * self.action_size * safe_encoding_size:
+                padding_needed = batch_size * self.action_size * safe_encoding_size - encoded_assets.numel()
+                padding = torch.zeros(batch_size, padding_needed, device=encoded_assets.device)
+                encoded_assets = torch.cat([encoded_assets, padding], dim=1)
+                print(f"Aggiunto padding di emergenza, nuova dimensione: {encoded_assets.size()}")
+            
+            assets = encoded_assets.view(batch_size, self.action_size, safe_encoding_size)
+            encoding_size = safe_encoding_size
+            print(f"Reshape di fallback riuscito: {assets.shape}")
+        
+        # Se necessario, adatta il layer di attenzione alle dimensioni corrette
+        if self.attention.weight.shape[1] != encoding_size:
+            print(f"ATTENZIONE: Ridimensionamento del layer di attenzione da {self.attention.weight.shape[1]} a {encoding_size}")
+            old_attention = self.attention
+            self.attention = torch.nn.Linear(encoding_size, 1)
+            # Inizializza con valori sensati
+            fan_in = encoding_size
+            lim = 1.0 / np.sqrt(fan_in)
+            self.attention.weight.data.uniform_(-lim, lim)
+            self.attention.bias.data.fill_(0)
         
         # Calcola punteggi di attenzione
         attention_scores = self.attention(assets).squeeze(-1)
         attention_weights = F.softmax(attention_scores, dim=1).unsqueeze(-1)
         
-        # Trasforma gli asset
+        # Trasforma gli asset - adatta il layer value se necessario
+        if self.value.weight.shape[1] != encoding_size:
+            print(f"ATTENZIONE: Ridimensionamento del layer value da {self.value.weight.shape[1]} a {encoding_size}")
+            old_value = self.value
+            self.value = torch.nn.Linear(encoding_size, encoding_size)
+            # Inizializza con valori sensati
+            fan_in = encoding_size
+            lim = 1.0 / np.sqrt(fan_in)
+            self.value.weight.data.uniform_(-lim, lim)
+            self.value.bias.data.fill_(0)
+        
         values = self.value(assets)
         
         # Applica attenzione
@@ -326,27 +414,73 @@ class EnhancedPortfolioActor(nn.Module):
         
         # Espandi il contesto e concatena con gli encoding originali
         context_expanded = context.unsqueeze(1).expand(-1, self.action_size, -1)
-        enhanced_assets = torch.cat((assets, context_expanded), dim=2).view(batch_size, -1)
+        enhanced_assets = torch.cat((assets, context_expanded), dim=2)
         
-        return enhanced_assets
+        # Appiattisci il risultato
+        enhanced_size = enhanced_assets.size(2) * self.action_size
+        flattened = enhanced_assets.view(batch_size, enhanced_size)
+        
+        #print(f"Enhanced output shape: {flattened.shape}")
+        
+        return flattened
     
     def forward(self, state):
         """
         Forward pass dell'Actor avanzato.
         """
         batch_size = state.size(0)
-        features_per_asset = (state.size(1) - (state.size(1) % self.action_size)) // self.action_size
+        
+        # Estrai le feature extra (ultime 10 feature dello stato)
+        # Le feature extra sono posizioni (num_assets) + metriche di portfolio (5)
+        extra_features_size = self.action_size + 5  # posizioni + metriche
+        
+        if state.size(1) > self.features_per_asset * self.action_size + extra_features_size:
+            print(f"AVVISO: Lo stato ha dimensione {state.size(1)}, più grande del previsto")
+        
+        # Assume che le feature extra siano in fondo
+        extra_features = state[:, -extra_features_size:] if state.size(1) > extra_features_size else None
         
         # Codifica gli asset
         encoded_state = self.asset_encoder(state, self.action_size)
         
         # Applica attenzione se abilitata
         if self.use_attention:
-            encoded_state = self.apply_attention(encoded_state, batch_size)
+            attention_output = self.apply_attention(encoded_state, batch_size)
+            
+            # Concatena con feature extra se presenti
+            if extra_features is not None:
+                encoded_state = torch.cat((attention_output, extra_features), dim=1)
+                #print(f"Concatenato attention_output {attention_output.shape} con extra_features {extra_features.shape}")
+            else:
+                encoded_state = attention_output
+                #print(f"Nessuna feature extra da concatenare, usando solo attention_output {attention_output.shape}")
+        
+        # Debug della dimensione finale prima di FC1
+        #print(f"DEBUG - forward: encoded_state final shape: {encoded_state.shape}, fc1 weight shape: {self.fc1.weight.shape}")
+        
+        # Adatta dinamicamente il layer FC1 se necessario
+        if self.fc1.weight.shape[1] != encoded_state.size(1):
+            #print(f"ATTENZIONE: Ridimensionamento del layer FC1 da {self.fc1.weight.shape[1]} a {encoded_state.size(1)}")
+            old_fc1_out_features = self.fc1.weight.shape[0]
+            new_fc1 = torch.nn.Linear(encoded_state.size(1), old_fc1_out_features)
+            
+            # Inizializza i pesi
+            fan_in = new_fc1.weight.data.size()[1]
+            lim = 1.0 / np.sqrt(fan_in)
+            new_fc1.weight.data.uniform_(-lim, lim)
+            new_fc1.bias.data.fill_(0)
+            
+            self.fc1 = new_fc1
         
         # Feed-forward con batch norm
-        x = F.relu(self.bn1(self.fc1(encoded_state)))
-        x = F.relu(self.bn2(self.fc2(x)))
-        
-        # Output layer
-        return self.fc3(x)
+        try:
+            x = F.relu(self.bn1(self.fc1(encoded_state)))
+            x = F.relu(self.bn2(self.fc2(x)))
+            
+            # Output layer
+            return self.fc3(x)
+        except RuntimeError as e:
+            print(f"ERRORE durante il forward pass: {e}")
+            print(f"Dettagli: encoded_state={encoded_state.shape}, fc1.weight={self.fc1.weight.shape}")
+            # Fallback sicuro
+            return torch.zeros(batch_size, self.action_size)

@@ -187,7 +187,62 @@ class PortfolioAgent:
         Resetta il rumore di esplorazione.
         """
         self.noise.reset()
-
+    # Aggiungi un metodo per salvare lo stato completo dell'agente
+    # Aggiungi questa funzione alla classe PortfolioAgent
+    def save_checkpoint(self, file_path, episode, iteration, metrics=None):
+        """
+        Salva un checkpoint con lo stato attuale dell'addestramento.
+        """
+        print(f"Preparazione checkpoint per episodio {episode}...")
+        
+        # Prepara le metriche
+        checkpoint_metrics = {}
+        if metrics:
+            for key, value in metrics.items():
+                if isinstance(value, deque):
+                    checkpoint_metrics[key] = list(value)
+                else:
+                    checkpoint_metrics[key] = value
+        
+        # Crea il checkpoint
+        checkpoint = {
+            'episode': episode,
+            'iteration': iteration,
+            'actor_state_dict': self.actor_local.state_dict(),
+            'critic_state_dict': self.critic_local.state_dict(),
+            'actor_target_state_dict': self.actor_target.state_dict(),
+            'critic_target_state_dict': self.critic_target.state_dict(),
+            'metrics': checkpoint_metrics
+        }
+        
+        # Salva il checkpoint
+        torch.save(checkpoint, file_path)
+        print(f"Checkpoint salvato: {file_path} (episodio {episode})")
+# Aggiungi un metodo per caricare da checkpoint
+    def load_checkpoint(self, path):
+        """
+        Carica un checkpoint completo dell'agente.
+        
+        Parametri:
+        - path: percorso del checkpoint da caricare
+        
+        Ritorna:
+        - episode: numero dell'episodio da cui riprendere
+        - results: dizionario dei risultati fino a questo punto
+        """
+        checkpoint = torch.load(path)
+        
+        # Carica stato dei modelli
+        if self.actor_local:
+            self.actor_local.load_state_dict(checkpoint['actor_state_dict'])
+        if self.critic_local:
+            self.critic_local.load_state_dict(checkpoint['critic_state_dict'])
+        if self.actor_target and checkpoint['actor_target_state_dict']:
+            self.actor_target.load_state_dict(checkpoint['actor_target_state_dict'])
+        if self.critic_target and checkpoint['critic_target_state_dict']:
+            self.critic_target.load_state_dict(checkpoint['critic_target_state_dict'])
+        
+        return checkpoint['episode'], checkpoint['results']
     def step(self, state, action, reward, next_state, done, pretrain=False):
         """
         Salva una transizione (state, action, reward, next_state, done) nel buffer di replay.
@@ -323,14 +378,24 @@ class PortfolioAgent:
         progress="tqdm",
         features_per_asset=0,  # Per EnhancedPortfolioActor
         encoding_size=0,       # Per EnhancedPortfolioActor
-        clip_grad_norm=1.0     # Limite per gradient clipping
+        clip_grad_norm=1.0,     # Limite per gradient clipping
+        checkpoint_path=None,
+        checkpoint_freq=10,     # Frequenza di salvataggio checkpoint (ogni N episodi)
+        resume_from=None       # Checkpoint da cui riprendere
     ):
         """
         Addestra l'agente per un certo numero di episodi.
         """
+        # Variabile per tracciare l'ultimo checkpoint salvato
+        self.last_checkpoint_episode = -1
+
         # Crea la directory per i pesi se non esiste
         if not os.path.isdir(weights):
             os.makedirs(weights, exist_ok=True)
+
+        # Nel corpo della funzione, aggiungi:
+        if checkpoint_path is None:
+            checkpoint_path = weights
 
         # Inizializza TensorBoard
         writer = SummaryWriter(log_dir=tensordir)
@@ -374,7 +439,7 @@ class PortfolioAgent:
                 fc3_units=fc3_units_actor,
                 use_batch_norm=self.use_batch_norm
             )
-        
+
         # Ottimizzatore per Actor
         actor_optimizer = optim.Adam(
             self.actor_local.parameters(), 
@@ -431,28 +496,65 @@ class PortfolioAgent:
         portfolio_values = deque(maxlen=10)
         sharpe_ratios = deque(maxlen=10)
 
-        # Prepara l'agente con esperienze pre-training
-        Node.reset_count()
-        self.pretrain(env, total_steps=total_steps)
-        
         # Variabili per il training
         i = 0
+        start_episode = 0
         N_train = total_episodes * env.T // learn_freq
         beta = self.beta0
         self.reset()
         n_train = 0
 
+        # Verifica se riprendere da un checkpoint
+        if resume_from and os.path.exists(resume_from):
+            print(f"Riprendendo l'addestramento da {resume_from}")
+            checkpoint = torch.load(resume_from)
+            
+            # Carica stato dei modelli
+            self.actor_local.load_state_dict(checkpoint['actor_state_dict'])
+            self.critic_local.load_state_dict(checkpoint['critic_state_dict'])
+            self.actor_target.load_state_dict(checkpoint['actor_target_state_dict'])
+            self.critic_target.load_state_dict(checkpoint['critic_target_state_dict'])
+            
+            # Ripristina lo stato delle metriche
+            if 'metrics' in checkpoint:
+                metrics = checkpoint['metrics']
+                if 'mean_rewards' in metrics and metrics['mean_rewards']:
+                    mean_rewards = deque(metrics['mean_rewards'], maxlen=10)
+                if 'cum_rewards' in metrics and metrics['cum_rewards']:
+                    cum_rewards = metrics['cum_rewards']
+                if 'portfolio_values' in metrics and metrics['portfolio_values']:
+                    portfolio_values = deque(metrics['portfolio_values'], maxlen=10)
+                if 'sharpe_ratios' in metrics and metrics['sharpe_ratios']:
+                    sharpe_ratios = deque(metrics['sharpe_ratios'], maxlen=10)
+                if 'actor_losses' in metrics and metrics['actor_losses']:
+                    actor_losses = deque(metrics['actor_losses'], maxlen=10)
+                if 'critic_losses' in metrics and metrics['critic_losses']:
+                    critic_losses = deque(metrics['critic_losses'], maxlen=10)
+            
+            # Ripristina episodio di partenza
+            start_episode = checkpoint['episode']
+            i = checkpoint.get('iteration', start_episode * env.T)
+            n_train = checkpoint.get('n_train', start_episode * env.T // learn_freq)
+            self.last_checkpoint_episode = start_episode - 1
+            
+            print(f"Addestramento ripreso dall'episodio {start_episode}")
+
+        # Prepara l'agente con esperienze pre-training
+        if start_episode == 0:  # Solo se non stiamo riprendendo da un checkpoint
+            Node.reset_count()
+            self.pretrain(env, total_steps=total_steps)
+
         # Configura la progress bar se richiesta
-        range_total_episodes = list(range(total_episodes))
         if progress == "tqdm_notebook":
             from tqdm import tqdm_notebook
-            range_total_episodes = tqdm_notebook(range_total_episodes)
+            range_total_episodes = tqdm_notebook(range(start_episode, total_episodes))
             progress_bar = range_total_episodes
         elif progress == "tqdm":
             from tqdm import tqdm
-            range_total_episodes = tqdm(range_total_episodes)
+            range_total_episodes = tqdm(range(start_episode, total_episodes))
             progress_bar = range_total_episodes
         else:
+            range_total_episodes = range(start_episode, total_episodes)
             progress_bar = None
 
         # Loop principale di training
@@ -462,6 +564,7 @@ class PortfolioAgent:
             state = env.get_state()
             done = env.done
             train_iter = 0
+            episode_complete = False
 
             # Loop per un singolo episodio
             while not done:
@@ -503,6 +606,7 @@ class PortfolioAgent:
                 
                 # A fine episodio, resetta il rumore e calcola metriche
                 if done:
+                    episode_complete = True
                     self.reset()
                     total_reward = np.sum(episode_rewards)
                     mean_rewards.append(total_reward)
@@ -602,12 +706,43 @@ class PortfolioAgent:
                     self.soft_update(self.critic_local, self.critic_target, tau_critic)
                     self.soft_update(self.actor_local, self.actor_target, tau_actor)
 
-            # Salva il modello periodicamente
-            if (episode % freq) == 0 or episode == total_episodes - 1:
+            # Salva il modello periodicamente (solo dopo episodi completi)
+            if episode_complete and ((episode % freq) == 0 or episode == total_episodes - 1):
                 actor_file = os.path.join(weights, f"portfolio_actor_{episode}.pth")
                 critic_file = os.path.join(weights, f"portfolio_critic_{episode}.pth")
                 torch.save(self.actor_local.state_dict(), actor_file)
                 torch.save(self.critic_local.state_dict(), critic_file)
+
+                # Salva checkpoint completo (solo se è un nuovo episodio rispetto all'ultimo checkpoint)
+                if episode != self.last_checkpoint_episode and ((episode % checkpoint_freq == 0) or episode == total_episodes - 1):
+                    self.last_checkpoint_episode = episode
+                    checkpoint_file = os.path.join(checkpoint_path, f"checkpoint_ep{episode}.pt")
+                    
+                    # Prepara metriche per il salvataggio
+                    metrics = {
+                        'mean_rewards': list(mean_rewards),
+                        'cum_rewards': cum_rewards,
+                        'portfolio_values': list(portfolio_values),
+                        'sharpe_ratios': list(sharpe_ratios),
+                        'actor_losses': list(actor_losses),
+                        'critic_losses': list(critic_losses)
+                    }
+                    
+                    # Crea il checkpoint
+                    checkpoint = {
+                        'episode': episode + 1,  # +1 perché è il prossimo episodio da cui partire
+                        'iteration': i,
+                        'n_train': n_train,
+                        'actor_state_dict': self.actor_local.state_dict(),
+                        'critic_state_dict': self.critic_local.state_dict(),
+                        'actor_target_state_dict': self.actor_target.state_dict(),
+                        'critic_target_state_dict': self.critic_target.state_dict(),
+                        'metrics': metrics
+                    }
+                    
+                    # Salva il checkpoint
+                    torch.save(checkpoint, checkpoint_file)
+                    print(f"Checkpoint salvato: {checkpoint_file}")
 
         # Esporta i dati TensorBoard
         writer.export_scalars_to_json("./portfolio_scalars.json")
