@@ -13,8 +13,6 @@ from portfolio_env import PortfolioEnvironment
 from portfolio_models import PortfolioActor, PortfolioCritic, EnhancedPortfolioActor
 
 
-#py run_portfolio_training.py --resume="results\portfolio\weights\checkpoint_ep0.pt"
-
 # Lista dei ticker da utilizzare nel portafoglio
 TICKERS = ["ARKG", "IBB", "IHI", "IYH", "XBI", "VHT"]
 
@@ -22,7 +20,7 @@ TICKERS = ["ARKG", "IBB", "IHI", "IYH", "XBI", "VHT"]
 BASE_PATH = 'C:\\Users\\Administrator\\Desktop\\DRL PORTFOLIO\\NAS Results\\Multi_Ticker\\Normalized_RL_INPUT\\'
 NORM_PARAMS_PATH_BASE = f'{BASE_PATH}json\\'
 CSV_PATH_BASE = f'{BASE_PATH}'
-OUTPUT_DIR = 'results\\portfolio'
+OUTPUT_DIR = 'results\\portfolio_with_commission'
 
 # Crea directory di output se non esiste
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -30,9 +28,7 @@ os.makedirs(f'{OUTPUT_DIR}\\weights', exist_ok=True)
 os.makedirs(f'{OUTPUT_DIR}\\test', exist_ok=True)
 os.makedirs(f'{OUTPUT_DIR}\\analysis', exist_ok=True)
 
-# Feature da utilizzare (sottogruppo delle feature originali, per rendere il modello più gestibile)
-# Scegliamo feature essenziali e rilevanti per analisi multi-asset
-# Sostituire la lista norm_columns attuale (circa alla riga 36-51) con questa:
+# Feature da utilizzare
 norm_columns = [
     "open", "volume", "change", "day", "week", "adjCloseGold", "adjCloseSpy",
     "Credit_Spread", #"Log_Close",
@@ -111,7 +107,6 @@ def load_data_for_tickers(tickers, train_fraction=0.8):
     # Aggiorna la lista dei ticker con quelli validi
     return dfs_train, dfs_test, norm_params_paths, valid_tickers
 
-# Modifica la funzione save_results in run_portfolio_training.py
 def save_results(results, output_dir, tickers):
     """Salva i risultati dell'addestramento."""
     try:
@@ -137,7 +132,8 @@ def save_results(results, output_dir, tickers):
             'final_reward': [final_reward],
             'final_portfolio_value': [final_portfolio_value],
             'final_sharpe_ratio': [final_sharpe_ratio],
-            'training_timestamp': [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
+            'training_timestamp': [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
+            'commission': ['YES']  # Aggiungi flag per identificare l'esecuzione con commissioni
         })
         
         # Salva il DataFrame
@@ -166,7 +162,7 @@ def plot_training_performance(results, output_dir, tickers):
     # Plot cumulative rewards
     plt.subplot(2, 2, 1)
     plt.plot(results['cum_rewards'])
-    plt.title('Ricompensa cumulativa')
+    plt.title('Ricompensa cumulativa (Con Commissioni)')
     plt.xlabel('Episodi (x5)')
     plt.ylabel('Ricompensa media')
     plt.grid(True, alpha=0.3)
@@ -174,7 +170,7 @@ def plot_training_performance(results, output_dir, tickers):
     # Plot portfolio values
     plt.subplot(2, 2, 2)
     plt.plot(results['final_portfolio_values'])
-    plt.title('Valore del portafoglio finale')
+    plt.title('Valore del portafoglio finale (Con Commissioni)')
     plt.xlabel('Episodi')
     plt.ylabel('Valore ($)')
     plt.grid(True, alpha=0.3)
@@ -182,7 +178,7 @@ def plot_training_performance(results, output_dir, tickers):
     # Plot Sharpe ratios
     plt.subplot(2, 2, 3)
     plt.plot(results['final_sharpe_ratios'])
-    plt.title('Sharpe Ratio')
+    plt.title('Sharpe Ratio (Con Commissioni)')
     plt.xlabel('Episodi')
     plt.ylabel('Sharpe Ratio')
     plt.grid(True, alpha=0.3)
@@ -240,6 +236,7 @@ def align_dataframes(dfs):
         print(f"Lunghezze dei DataFrame allineati: {lengths}")
         
         return aligned_dfs
+
 def diagnose_missing_columns(df, ticker, required_columns):
     """
     Diagnostica dettagliata delle colonne mancanti in un DataFrame.
@@ -315,13 +312,14 @@ def main(resume_from=None):
         max_step=max_steps,      # Numero massimo di step
         norm_params_paths=norm_params_paths,  # Parametri di normalizzazione
         norm_columns=norm_columns,  # Colonne da usare
-        free_trades_per_month=10,  # Operazioni gratuite al mese
-        commission_rate=0.0025,    # Commissione percentuale
-        min_commission=1.0,        # Commissione minima
-        trading_frequency_penalty_factor=0.1,  # Penalità trading frequente
+        # Ambiente con commissioni realistiche
+        free_trades_per_month=10,       # Operazioni gratuite al mese
+        commission_rate=0.0025,         # Commissione percentuale (0.25%)
+        min_commission=1.0,             # Commissione minima in dollari
+        trading_frequency_penalty_factor=0.1,  # Penalità per trading frequente
         position_stability_bonus_factor=0.2,   # Bonus stabilità posizioni
         correlation_penalty_factor=0.15,       # Penalità per correlazione
-        diversification_bonus_factor=0.15,     # Bonus diversificazione
+        diversification_bonus_factor=0.25,     # Bonus diversificazione
         initial_capital=100000,                # Capitale iniziale
         risk_free_rate=0.02,                   # Tasso risk-free
         use_sortino=True,                      # Usare Sortino ratio
@@ -343,19 +341,16 @@ def main(resume_from=None):
     )
     
     # 4. Avvia il training
-    print(f"Avvio del training per il portafoglio con {num_assets} asset...")
+    print(f"Avvio del training per il portafoglio con commissioni con {num_assets} asset...")
     
     # Calcola la dimensione per feature per asset (per l'EnhancedPortfolioActor)
     features_per_asset = len(norm_columns)
 
-    # Non è più necessario specificare encoding_size in modo rigido
-    if args.resume:
-        encoding_size = 32  # Un valore di base, sarà ignorato dalla nuova implementazione
+    if resume_from:
         print(f"Riprendendo l'addestramento da checkpoint...")
         agent.actor_local = None
         agent.actor_target = None
     else:
-        encoding_size = 32  # Un valore di base, sarà ignorato dalla nuova implementazione
         print(f"Iniziando nuovo addestramento...")
 
     results = agent.train(
@@ -370,9 +365,9 @@ def main(resume_from=None):
         total_steps=3000,           # Passi di pretraining aumentati
         weights=f'{OUTPUT_DIR}\\weights\\',
         freq=10,                     # Frequenza salvataggio
-        fc1_units_actor=512,         # Layer più grande per gestire più asset
-        fc2_units_actor=256,
-        fc3_units_actor=128,
+        fc1_units=512,         # Layer più grande per gestire più asset
+        fc2_units=256,
+        fc3_units=128,
         fc1_units_critic=1024,       # Layer più grande per critic
         fc2_units_critic=512,
         fc3_units_critic=256,
@@ -386,7 +381,7 @@ def main(resume_from=None):
         plots=False,
         progress="tqdm",
         features_per_asset=features_per_asset,  # Per EnhancedPortfolioActor
-        encoding_size=encoding_size,             # Dimensione encoding per asset
+        encoding_size=32,             # Dimensione encoding per asset
         clip_grad_norm=1.0            # Limite per gradient clipping
     )
     
@@ -394,7 +389,7 @@ def main(resume_from=None):
     save_results(results, OUTPUT_DIR, valid_tickers)
     plot_training_performance(results, OUTPUT_DIR, valid_tickers)
     
-    print(f"Training completato per il portafoglio!")
+    print(f"Training completato per il portafoglio con commissioni!")
     print(f"I modelli addestrati sono stati salvati in: {OUTPUT_DIR}\\weights\\")
     print(f"I log per TensorBoard sono stati salvati in: {OUTPUT_DIR}\\runs\\")
     
@@ -417,13 +412,14 @@ def main(resume_from=None):
         max_step=len(next(iter(aligned_dfs_test.values()))),  # Usa tutto il dataset di test
         norm_params_paths=norm_params_paths,
         norm_columns=norm_columns,
-        free_trades_per_month=10,       # Parametri realistici per test
+        # Test con stesse commissioni dell'addestramento
+        free_trades_per_month=10,
         commission_rate=0.0025,
         min_commission=1.0,
         trading_frequency_penalty_factor=0.1,
         position_stability_bonus_factor=0.2,
         correlation_penalty_factor=0.15,
-        diversification_bonus_factor=0.15,
+        diversification_bonus_factor=0.25,
         initial_capital=100000,
         risk_free_rate=0.02,
         use_sortino=True,
@@ -441,41 +437,42 @@ def main(resume_from=None):
             # Se non ci sono modelli numerici, usa initial o il primo disponibile
             last_model = next((f for f in model_files if 'initial' in f), model_files[0] if model_files else None)
         
-        last_critic = last_model.replace('actor', 'critic')
-        
-        print(f"Caricamento del modello migliore: {last_model}")
-        agent.load_models(
-            actor_path=f'{OUTPUT_DIR}\\weights\\{last_model}',
-            critic_path=f'{OUTPUT_DIR}\\weights\\{last_critic}' if os.path.exists(f'{OUTPUT_DIR}\\weights\\{last_critic}') else None
-        )
-        
-        # Esegui una valutazione iniziale
-        print("Esecuzione di una valutazione sul dataset di test...")
-        test_env.reset()
-        state = test_env.get_state()
-        done = test_env.done
-        
-        while not done:
-            with torch.no_grad():
-                actions = agent.act(state, noise=False)
+        if last_model:
+            last_critic = last_model.replace('actor', 'critic')
             
-            reward = test_env.step(actions)
+            print(f"Caricamento del modello migliore: {last_model}")
+            agent.load_models(
+                actor_path=f'{OUTPUT_DIR}\\weights\\{last_model}',
+                critic_path=f'{OUTPUT_DIR}\\weights\\{last_critic}' if os.path.exists(f'{OUTPUT_DIR}\\weights\\{last_critic}') else None
+            )
+            
+            # Esegui una valutazione iniziale
+            print("Esecuzione di una valutazione sul dataset di test...")
+            test_env.reset()
             state = test_env.get_state()
             done = test_env.done
-        
-        # Stampa risultati finali
-        metrics = test_env.get_real_portfolio_metrics()
-        print("\nRisultati sul dataset di test:")
-        print(f"Rendimento totale: {metrics['total_return']:.2f}%")
-        print(f"Sharpe ratio: {metrics['sharpe_ratio']:.2f}")
-        print(f"Max drawdown: {metrics['max_drawdown']:.2f}%")
-        print(f"Valore finale portafoglio: ${metrics['final_portfolio_value']:.2f}")
+            
+            while not done:
+                with torch.no_grad():
+                    actions = agent.act(state, noise=False)
+                
+                reward = test_env.step(actions)
+                state = test_env.get_state()
+                done = test_env.done
+            
+            # Stampa risultati finali
+            metrics = test_env.get_real_portfolio_metrics()
+            print("\nRisultati sul dataset di test (ambiente con commissioni):")
+            print(f"Rendimento totale: {metrics['total_return']:.2f}%")
+            print(f"Sharpe ratio: {metrics['sharpe_ratio']:.2f}")
+            print(f"Max drawdown: {metrics['max_drawdown']:.2f}%")
+            print(f"Valore finale portafoglio: ${metrics['final_portfolio_value']:.2f}")
     else:
         print("Nessun modello trovato per la valutazione.")
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description='Addestra il portafoglio RL')
+    parser = argparse.ArgumentParser(description='Addestra il portafoglio RL con commissioni')
     parser.add_argument('--resume', type=str, help='Percorso del checkpoint da cui riprendere')
     args = parser.parse_args()
     
