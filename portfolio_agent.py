@@ -14,7 +14,7 @@ from IPython import display
 
 # Import dei moduli locali
 from memory import Memory, PrioritizedMemory, Node
-from portfolio_models import PortfolioActor, PortfolioCritic, EnhancedPortfolioActor
+from portfolio_models import PortfolioActor, PortfolioCritic, EnhancedPortfolioActor, AssetEncoder
 
 # Definizione di un namedtuple per le transizioni
 Transition = namedtuple("Transition", ("state", "action", "reward", "next_state", "dones"))
@@ -230,7 +230,7 @@ class PortfolioAgent:
         - episode: numero dell'episodio da cui riprendere
         - results: dizionario dei risultati fino a questo punto
         """
-        checkpoint = torch.load(path)
+        checkpoint = torch.load(path, weights_only=False)
         
         # Carica stato dei modelli
         if self.actor_local:
@@ -400,8 +400,84 @@ class PortfolioAgent:
         # Inizializza TensorBoard
         writer = SummaryWriter(log_dir=tensordir)
 
-        # Inizializza le reti Actor
+        # ====== FASE 1: Analisi del checkpoint per recuperare le dimensioni ======
+        # Invece di inizializzare subito i modelli, prima analizziamo il checkpoint
+        checkpoint = None
+        asset_encoder_dim = None
+        actor_dict = None
+        
+        if resume_from and os.path.exists(resume_from):
+            print(f"Analisi del checkpoint {resume_from} per determinare le dimensioni corrette...")
+            checkpoint = torch.load(resume_from, weights_only=False)
+            
+            # Estrai dimensioni dai nomi dei parametri per garantire compatibilità
+            if 'actor_state_dict' in checkpoint:
+                actor_dict = checkpoint['actor_state_dict']
+                
+                # Estrai dimensione dell'encoder
+                if 'asset_encoder.fc2.weight' in actor_dict:
+                    encoder_shape = actor_dict['asset_encoder.fc2.weight'].shape
+                    if len(encoder_shape) >= 1:
+                        asset_encoder_dim = encoder_shape[0]
+                        print(f"Dimensione dell'encoder degli asset: {asset_encoder_dim}")
+                
+                # Estrai dimensione del layer di attenzione
+                if 'attention.weight' in actor_dict:
+                    attention_shape = actor_dict['attention.weight'].shape
+                    if len(attention_shape) > 1:
+                        encoding_size = attention_shape[1]
+                        print(f"Adattamento encoding_size a {encoding_size} dal checkpoint")
+
+        # Dopo aver analizzato il checkpoint
+        attention_dim = None
+        encoder_output_size = None
+        
+        if actor_dict is not None:
+            if 'attention.weight' in actor_dict:
+                attention_shape = actor_dict['attention.weight'].shape
+                if len(attention_shape) > 1:
+                    attention_dim = attention_shape[1]
+                    print(f"Dimensione attention: {attention_dim}")
+
+            if 'asset_encoder.fc2.weight' in actor_dict:
+                encoder_shape = actor_dict['asset_encoder.fc2.weight'].shape
+                if len(encoder_shape) >= 1:
+                    encoder_output_size = encoder_shape[0]
+                    print(f"Dimensione encoder output: {encoder_output_size}")
+
+        # Usa entrambe le dimensioni
+        self.actor_local = EnhancedPortfolioActor(
+            env.state_size, 
+            self.num_assets, 
+            features_per_asset,
+            fc1_units=fc1_units_actor,
+            fc2_units=fc2_units_actor,
+            encoding_size=encoding_size,
+            use_attention=True,
+            attention_size=attention_dim,
+            encoder_output_size=encoder_output_size
+        )
+
+        # ====== FASE 2: Inizializzazione dei modelli con le dimensioni corrette ======
         if self.use_enhanced_actor and features_per_asset > 0:
+            # Assicurati che encoding_size abbia un valore sensato
+            if encoding_size == 0:
+                encoding_size = 16  # Default
+            
+            # Se abbiamo ottenuto la dimensione dell'encoder dal checkpoint, usala
+            if asset_encoder_dim is not None:
+                print(f"Utilizzando dimensione encoder dal checkpoint: {asset_encoder_dim}")
+                encoding_size = asset_encoder_dim  # Usa la dimensione del checkpoint
+            
+            print(f"Inizializzazione EnhancedPortfolioActor con encoding_size={encoding_size}")
+            
+            # Inizializza l'asset encoder prima, così possiamo passarlo agli actor
+            asset_encoder = AssetEncoder(
+                features_per_asset=features_per_asset, 
+                encoding_size=encoding_size,
+                seed=0
+            )
+            
             # Versione avanzata dell'Actor con meccanismi di attenzione
             self.actor_local = EnhancedPortfolioActor(
                 env.state_size, 
@@ -409,8 +485,10 @@ class PortfolioAgent:
                 features_per_asset,
                 fc1_units=fc1_units_actor,
                 fc2_units=fc2_units_actor,
-                encoding_size=encoding_size or 16,
-                use_attention=True
+                encoding_size=encoding_size,
+                use_attention=True,
+                attention_size=attention_dim,
+                encoder_output_size=encoder_output_size
             )
             self.actor_target = EnhancedPortfolioActor(
                 env.state_size, 
@@ -418,7 +496,7 @@ class PortfolioAgent:
                 features_per_asset,
                 fc1_units=fc1_units_actor,
                 fc2_units=fc2_units_actor,
-                encoding_size=encoding_size or 16,
+                encoding_size=encoding_size,
                 use_attention=True
             )
         else:
@@ -440,19 +518,6 @@ class PortfolioAgent:
                 use_batch_norm=self.use_batch_norm
             )
 
-        # Ottimizzatore per Actor
-        actor_optimizer = optim.Adam(
-            self.actor_local.parameters(), 
-            lr=lr_actor, 
-            weight_decay=weight_decay_actor
-        )
-        # Scheduler per learning rate
-        actor_lr_scheduler = lr_scheduler.StepLR(
-            actor_optimizer, 
-            step_size=100, 
-            gamma=0.5
-        )
-
         # Inizializza le reti Critic
         self.critic_local = PortfolioCritic(
             env.state_size, 
@@ -471,6 +536,19 @@ class PortfolioAgent:
             use_batch_norm=self.use_batch_norm
         )
         
+        # Ottimizzatore per Actor
+        actor_optimizer = optim.Adam(
+            self.actor_local.parameters(), 
+            lr=lr_actor, 
+            weight_decay=weight_decay_actor
+        )
+        # Scheduler per learning rate
+        actor_lr_scheduler = lr_scheduler.StepLR(
+            actor_optimizer, 
+            step_size=100, 
+            gamma=0.5
+        )
+        
         # Ottimizzatore per Critic
         critic_optimizer = optim.Adam(
             self.critic_local.parameters(), 
@@ -484,9 +562,10 @@ class PortfolioAgent:
             gamma=0.5
         )
 
-        # Salva la rete Actor inizializzata
-        model_file = os.path.join(weights, "portfolio_actor_initial.pth")
-        torch.save(self.actor_local.state_dict(), model_file)
+        # Salva la rete Actor inizializzata (solo se non riprendiamo da checkpoint)
+        if not resume_from:
+            model_file = os.path.join(weights, "portfolio_actor_initial.pth")
+            torch.save(self.actor_local.state_dict(), model_file)
 
         # Deque per memorizzare metriche di training
         mean_rewards = deque(maxlen=10)
@@ -504,40 +583,44 @@ class PortfolioAgent:
         self.reset()
         n_train = 0
 
-        # Verifica se riprendere da un checkpoint
-        if resume_from and os.path.exists(resume_from):
+        # ====== FASE 3: Caricamento del checkpoint ======
+        if checkpoint is not None:  # Se abbiamo già caricato il checkpoint
             print(f"Riprendendo l'addestramento da {resume_from}")
-            checkpoint = torch.load(resume_from)
             
-            # Carica stato dei modelli
-            self.actor_local.load_state_dict(checkpoint['actor_state_dict'])
-            self.critic_local.load_state_dict(checkpoint['critic_state_dict'])
-            self.actor_target.load_state_dict(checkpoint['actor_target_state_dict'])
-            self.critic_target.load_state_dict(checkpoint['critic_target_state_dict'])
-            
-            # Ripristina lo stato delle metriche
-            if 'metrics' in checkpoint:
-                metrics = checkpoint['metrics']
-                if 'mean_rewards' in metrics and metrics['mean_rewards']:
-                    mean_rewards = deque(metrics['mean_rewards'], maxlen=10)
-                if 'cum_rewards' in metrics and metrics['cum_rewards']:
-                    cum_rewards = metrics['cum_rewards']
-                if 'portfolio_values' in metrics and metrics['portfolio_values']:
-                    portfolio_values = deque(metrics['portfolio_values'], maxlen=10)
-                if 'sharpe_ratios' in metrics and metrics['sharpe_ratios']:
-                    sharpe_ratios = deque(metrics['sharpe_ratios'], maxlen=10)
-                if 'actor_losses' in metrics and metrics['actor_losses']:
-                    actor_losses = deque(metrics['actor_losses'], maxlen=10)
-                if 'critic_losses' in metrics and metrics['critic_losses']:
-                    critic_losses = deque(metrics['critic_losses'], maxlen=10)
-            
-            # Ripristina episodio di partenza
-            start_episode = checkpoint['episode']
-            i = checkpoint.get('iteration', start_episode * env.T)
-            n_train = checkpoint.get('n_train', start_episode * env.T // learn_freq)
-            self.last_checkpoint_episode = start_episode - 1
-            
-            print(f"Addestramento ripreso dall'episodio {start_episode}")
+            try:
+                # Carica stato dei modelli
+                self.actor_local.load_state_dict(checkpoint['actor_state_dict'])
+                self.critic_local.load_state_dict(checkpoint['critic_state_dict'])
+                self.actor_target.load_state_dict(checkpoint['actor_target_state_dict'])
+                self.critic_target.load_state_dict(checkpoint['critic_target_state_dict'])
+                
+                # Ripristina lo stato delle metriche
+                if 'metrics' in checkpoint:
+                    metrics = checkpoint['metrics']
+                    if 'mean_rewards' in metrics and metrics['mean_rewards']:
+                        mean_rewards = deque(metrics['mean_rewards'], maxlen=10)
+                    if 'cum_rewards' in metrics and metrics['cum_rewards']:
+                        cum_rewards = metrics['cum_rewards']
+                    if 'portfolio_values' in metrics and metrics['portfolio_values']:
+                        portfolio_values = deque(metrics['portfolio_values'], maxlen=10)
+                    if 'sharpe_ratios' in metrics and metrics['sharpe_ratios']:
+                        sharpe_ratios = deque(metrics['sharpe_ratios'], maxlen=10)
+                    if 'actor_losses' in metrics and metrics['actor_losses']:
+                        actor_losses = deque(metrics['actor_losses'], maxlen=10)
+                    if 'critic_losses' in metrics and metrics['critic_losses']:
+                        critic_losses = deque(metrics['critic_losses'], maxlen=10)
+                
+                # Ripristina episodio di partenza
+                start_episode = checkpoint['episode']
+                i = checkpoint.get('iteration', start_episode * env.T)
+                n_train = checkpoint.get('n_train', start_episode * env.T // learn_freq)
+                self.last_checkpoint_episode = start_episode - 1
+                
+                print(f"Addestramento ripreso dall'episodio {start_episode}")
+            except Exception as e:
+                print(f"Errore durante il caricamento del checkpoint: {e}")
+                print("Iniziando nuovo addestramento...")
+                start_episode = 0
 
         # Prepara l'agente con esperienze pre-training
         if start_episode == 0:  # Solo se non stiamo riprendendo da un checkpoint
@@ -557,7 +640,7 @@ class PortfolioAgent:
             range_total_episodes = range(start_episode, total_episodes)
             progress_bar = None
 
-        # Loop principale di training
+        # ====== FASE 4: Loop di addestramento ======
         for episode in range_total_episodes:
             episode_rewards = []
             env.reset()
@@ -765,11 +848,11 @@ class PortfolioAgent:
         - critic_path: percorso al file dei pesi del Critic (opzionale)
         """
         if self.actor_local is not None:
-            self.actor_local.load_state_dict(torch.load(actor_path))
+            self.actor_local.load_state_dict(torch.load(actor_path,weights_only=False ))
             if self.actor_target is not None:
-                self.actor_target.load_state_dict(torch.load(actor_path))
+                self.actor_target.load_state_dict(torch.load(actor_path, weights_only=False))
                 
         if critic_path is not None and self.critic_local is not None:
-            self.critic_local.load_state_dict(torch.load(critic_path))
+            self.critic_local.load_state_dict(torch.load(critic_path, weights_only=False))
             if self.critic_target is not None:
-                self.critic_target.load_state_dict(torch.load(critic_path))
+                self.critic_target.load_state_dict(torch.load(critic_path, weights_only=False))

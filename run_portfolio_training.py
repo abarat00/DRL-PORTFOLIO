@@ -5,6 +5,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from datetime import datetime
+from collections import deque
 
 # Import dei nostri moduli
 from portfolio_agent import PortfolioAgent
@@ -115,13 +116,24 @@ def save_results(results, output_dir, tickers):
     """Salva i risultati dell'addestramento."""
     try:
         # Estrai in modo sicuro le metriche finali
-        final_reward = np.mean(list(results['final_rewards'])[-3:]) if len(results['final_rewards']) >= 3 else np.mean(list(results['final_rewards']))
-        final_portfolio_value = np.mean(list(results['final_portfolio_values'])[-3:]) if len(results['final_portfolio_values']) >= 3 else np.mean(list(results['final_portfolio_values']))
-        final_sharpe_ratio = np.mean(list(results['final_sharpe_ratios'])[-3:]) if len(results['final_sharpe_ratios']) >= 3 else np.mean(list(results['final_sharpe_ratios']))
+        if isinstance(results['final_rewards'], deque):
+            final_reward = np.mean(list(results['final_rewards'])[-3:]) if len(results['final_rewards']) >= 3 else np.mean(list(results['final_rewards']))
+        else:
+            final_reward = results['final_rewards']
+            
+        if isinstance(results['final_portfolio_values'], deque):
+            final_portfolio_value = np.mean(list(results['final_portfolio_values'])[-3:]) if len(results['final_portfolio_values']) >= 3 else np.mean(list(results['final_portfolio_values']))
+        else:
+            final_portfolio_value = results['final_portfolio_values']
+            
+        if isinstance(results['final_sharpe_ratios'], deque):
+            final_sharpe_ratio = np.mean(list(results['final_sharpe_ratios'])[-3:]) if len(results['final_sharpe_ratios']) >= 3 else np.mean(list(results['final_sharpe_ratios']))
+        else:
+            final_sharpe_ratio = results['final_sharpe_ratios']
         
         # Crea DataFrame
         results_df = pd.DataFrame({
-            'ticker': tickers,
+            'ticker': [', '.join(tickers)],  # Unisci i ticker in una stringa
             'final_reward': [final_reward],
             'final_portfolio_value': [final_portfolio_value],
             'final_sharpe_ratio': [final_sharpe_ratio],
@@ -335,10 +347,18 @@ def main(resume_from=None):
     
     # Calcola la dimensione per feature per asset (per l'EnhancedPortfolioActor)
     features_per_asset = len(norm_columns)
-    
+
+    if args.resume:
+        encoding_size = 32  # Forza la dimensione per adattarsi al checkpoint
+        print(f"Utilizzo forzato di encoding_size={encoding_size} per compatibilità con il checkpoint")
+        agent.actor_local = None  # Forza la reinizializzazione quando si riprende da checkpoint
+        agent.actor_target = None
+    else:
+        encoding_size = 32  # Usa il valore standard per nuovo addestramento
+
     results = agent.train(
         env=env,
-        total_episodes=300,         # Episodi aumentati per complessità maggiore
+        total_episodes=200,         # Episodi aumentati per complessità maggiore
         tau_actor=0.01,             # Tasso update actor
         tau_critic=0.03,            # Tasso update critic
         lr_actor=5e-6,              # Learning rate actor (ridotto)
@@ -359,12 +379,12 @@ def main(resume_from=None):
         tensordir=f'{OUTPUT_DIR}\\runs\\',
         checkpoint_freq=10,          # Salva checkpoint ogni 10 episodi
         checkpoint_path=f'{OUTPUT_DIR}\\weights\\',
-        resume_from=None,            # Imposta a un percorso specifico se vuoi riprendere
+        resume_from=resume_from,            # Imposta a un percorso specifico se vuoi riprendere
         learn_freq=5,                # Aggiornamento più frequente
         plots=False,
         progress="tqdm",
         features_per_asset=features_per_asset,  # Per EnhancedPortfolioActor
-        encoding_size=32,             # Dimensione encoding per asset
+        encoding_size=encoding_size,             # Dimensione encoding per asset
         clip_grad_norm=1.0            # Limite per gradient clipping
     )
     
@@ -411,8 +431,14 @@ def main(resume_from=None):
     # Carica il modello migliore
     model_files = [f for f in os.listdir(f'{OUTPUT_DIR}\\weights\\') if f.startswith('portfolio_actor_') and f.endswith('.pth')]
     if model_files:
-        # Ordina per episodio e prendi l'ultimo
-        last_model = sorted(model_files, key=lambda x: int(x.split('_')[-1].split('.')[0]))[-1]
+        # Filtra solo i file numerici, escludendo 'initial'
+        numeric_models = [f for f in model_files if f.split('_')[-1].split('.')[0].isdigit()]
+        if numeric_models:
+            last_model = sorted(numeric_models, key=lambda x: int(x.split('_')[-1].split('.')[0]))[-1]
+        else:
+            # Se non ci sono modelli numerici, usa initial o il primo disponibile
+            last_model = next((f for f in model_files if 'initial' in f), model_files[0] if model_files else None)
+        
         last_critic = last_model.replace('actor', 'critic')
         
         print(f"Caricamento del modello migliore: {last_model}")
@@ -447,7 +473,7 @@ def main(resume_from=None):
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description='Addestra il portafoglio con RL')
+    parser = argparse.ArgumentParser(description='Addestra il portafoglio RL')
     parser.add_argument('--resume', type=str, help='Percorso del checkpoint da cui riprendere')
     args = parser.parse_args()
     

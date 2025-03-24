@@ -16,11 +16,11 @@ from portfolio_models import PortfolioActor, PortfolioCritic, EnhancedPortfolioA
 
 # Configurazione
 TICKERS = ["ARKG", "IBB", "IHI", "IYH", "XBI", "VHT"]  # I ticker nel portafoglio
-BASE_PATH = '/Users/Alessandro/Desktop/DRL 2/NAS Results/Multi_Ticker/Normalized_RL_INPUT/'
-NORM_PARAMS_PATH_BASE = f'{BASE_PATH}json/'
+BASE_PATH = 'C:\\Users\\Administrator\\Desktop\\DRL PORTFOLIO\\NAS Results\\Multi_Ticker\\Normalized_RL_INPUT\\'
+NORM_PARAMS_PATH_BASE = f'{BASE_PATH}json\\'
 CSV_PATH_BASE = f'{BASE_PATH}'
-OUTPUT_DIR = 'results/portfolio'
-EVALUATION_DIR = f'{OUTPUT_DIR}/evaluation'
+OUTPUT_DIR = 'results\\portfolio'
+EVALUATION_DIR = f'{OUTPUT_DIR}\\evaluation'
 BENCHMARK_TICKER = 'SPY'  # Usato per confrontare le performance
 
 # Crea directory di output se non esiste
@@ -29,7 +29,8 @@ os.makedirs(EVALUATION_DIR, exist_ok=True)
 # Feature da utilizzare (manteniamo tutte le feature originali)
 norm_columns = [
     "open", "volume", "change", "day", "week", "adjCloseGold", "adjCloseSpy",
-    "Credit_Spread", "Log_Close", "m_plus", "m_minus", "drawdown", "drawup",
+    "Credit_Spread", #"Log_Close", 
+    "m_plus", "m_minus", "drawdown", "drawup",
     "s_plus", "s_minus", "upper_bound", "lower_bound", "avg_duration", "avg_depth",
     "cdar_95", "VIX_Close", "MACD", "MACD_Signal", "MACD_Histogram", "SMA5",
     "SMA10", "SMA15", "SMA20", "SMA25", "SMA30", "SMA36", "RSI5", "RSI14", "RSI20",
@@ -50,17 +51,17 @@ def load_test_data():
     valid_tickers = []
     
     for ticker in TICKERS:
-        test_file = f'{OUTPUT_DIR}/test/{ticker}_test_aligned.csv'
+        test_file = f'{OUTPUT_DIR}\\test\\{ticker}_test_aligned.csv'
         norm_params_path = f'{NORM_PARAMS_PATH_BASE}{ticker}_norm_params.json'
         
         # Verifica esistenza dei file
         if not os.path.exists(test_file):
-            if os.path.exists(f'{OUTPUT_DIR}/test/{ticker}_test.csv'):
-                test_file = f'{OUTPUT_DIR}/test/{ticker}_test.csv'
+            if os.path.exists(f'{OUTPUT_DIR}\\test\\{ticker}_test.csv'):
+                test_file = f'{OUTPUT_DIR}\\test\\{ticker}_test.csv'
             else:
                 print(f"File di test mancante per {ticker}. Provo a usare i dati originali.")
                 # Tenta di caricare e preparare i dati dai file originali
-                csv_path = f'{CSV_PATH_BASE}{ticker}/{ticker}_normalized.csv'
+                csv_path = f'{CSV_PATH_BASE}{ticker}\\{ticker}_normalized.csv'
                 if not os.path.exists(csv_path):
                     print(f"Salto il ticker {ticker} a causa di file mancanti")
                     continue
@@ -81,9 +82,9 @@ def load_test_data():
                 
                 train_size = int(len(df) * 0.8)
                 df_test = df.iloc[train_size:]
-                df_test.to_csv(f'{OUTPUT_DIR}/test/{ticker}_test.csv', index=False)
+                df_test.to_csv(f'{OUTPUT_DIR}\\test\\{ticker}_test.csv', index=False)
                 print(f"Creato file di test per {ticker} dai dati originali")
-                test_file = f'{OUTPUT_DIR}/test/{ticker}_test.csv'
+                test_file = f'{OUTPUT_DIR}\\test\\{ticker}_test.csv'
         
         if not os.path.exists(norm_params_path):
             print(f"File parametri normalizzazione mancante per {ticker}")
@@ -130,7 +131,7 @@ def align_dataframes(dfs):
 
 def load_benchmark_data(start_date, end_date):
     """Carica dati per benchmark (SPY) per lo stesso periodo di tempo."""
-    benchmark_path = f'{CSV_PATH_BASE}{BENCHMARK_TICKER}/{BENCHMARK_TICKER}_normalized.csv'
+    benchmark_path = f'{CSV_PATH_BASE}{BENCHMARK_TICKER}\\{BENCHMARK_TICKER}_normalized.csv'
     if not os.path.exists(benchmark_path):
         print(f"Dati benchmark {BENCHMARK_TICKER} non trovati. Usa 'adjCloseSpy' dai dati esistenti.")
         return None
@@ -209,14 +210,20 @@ def initialize_agent(num_assets, model_file=None, use_enhanced_actor=True):
             features_per_asset = len(norm_columns)
             agent.actor_local = EnhancedPortfolioActor(
                 state_size=len(norm_columns) * num_assets + num_assets + 5,
-                action_size=num_assets,
+                action_size=num_assets, 
                 features_per_asset=features_per_asset,
-                encoding_size=32
+                fc1_units=512,  # Modifica qui: usa 512 invece di 256
+                fc2_units=256,  # Modifica qui: usa 256 invece di 128
+                encoding_size=32,
+                use_attention=True
             )
         else:
             agent.actor_local = PortfolioActor(
                 state_size=len(norm_columns) * num_assets + num_assets + 5,
-                action_size=num_assets
+                action_size=num_assets,
+                fc1_units=512,  # Modifica qui: usa 512 invece di 256
+                fc2_units=256,  # Modifica qui: usa 256 invece di 128
+                fc3_units=128   # Aggiungi questa linea se necessario
             )
         
         # Carica i pesi se esistono
@@ -308,7 +315,7 @@ def run_backtest(env, agent, record_interval=5):
         for ticker in env.tickers:
             denormalized_prices[ticker] = []
             for p in prices[ticker]:
-                real_p = env.denormalize_price(ticker, p, "Log_Close")
+                real_p = env.denormalize_price(ticker, p, "adjClose")
                 denormalized_prices[ticker].append(real_p)
     
     # Calcola altre metriche avanzate
@@ -446,7 +453,7 @@ def calculate_benchmark_performance(results, dfs_test, benchmark_df=None):
             }
     
     # 2. Benchmark di mercato (SPY)
-    if benchmark_df is not None and 'date' in benchmark_df.columns and 'Log_Close' in benchmark_df.columns:
+    if benchmark_df is not None and 'date' in benchmark_df.columns and 'adjClose' in benchmark_df.columns:
         # Allinea date
         market_values = []
         market_returns = []
@@ -456,13 +463,13 @@ def calculate_benchmark_performance(results, dfs_test, benchmark_df=None):
         first_idx = benchmark_df[benchmark_df['date'] == first_date].index
         
         if len(first_idx) > 0:
-            initial_price = benchmark_df.loc[first_idx[0], 'Log_Close']
+            initial_price = benchmark_df.loc[first_idx[0], 'adjClose']
             initial_units = initial_capital / initial_price
             
             for d in dates:
                 idx = benchmark_df[benchmark_df['date'] == d].index
                 if len(idx) > 0:
-                    price = benchmark_df.loc[idx[0], 'Log_Close']
+                    price = benchmark_df.loc[idx[0], 'adjClose']
                     portfolio_value = initial_units * price
                     market_values.append(portfolio_value)
                 else:
@@ -612,7 +619,7 @@ def visualize_results(results, benchmark_results, output_dir):
     plt.setp(ax4.xaxis.get_majorticklabels(), rotation=45)
     
     plt.tight_layout()
-    plt.savefig(f'{output_dir}/portfolio_performance.png')
+    plt.savefig(f'{output_dir}\\portfolio_performance.png')
     plt.close()
     
     # ----- Figura supplementare: Heatmap delle correlazioni -----
@@ -643,7 +650,7 @@ def visualize_results(results, benchmark_results, output_dir):
     sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1, center=0)
     plt.title('Correlation Matrix of Asset Returns', fontsize=16)
     plt.tight_layout()
-    plt.savefig(f'{output_dir}/correlation_heatmap.png')
+    plt.savefig(f'{output_dir}\\correlation_heatmap.png')
     plt.close()
     
     # ----- Figura supplementare: Distribuzione dei rendimenti -----
@@ -656,7 +663,7 @@ def visualize_results(results, benchmark_results, output_dir):
         plt.ylabel('Daily Return')
         plt.xticks(rotation=45)
         plt.tight_layout()
-        plt.savefig(f'{output_dir}/returns_distribution.png')
+        plt.savefig(f'{output_dir}\\returns_distribution.png')
         plt.close()
     
     # ----- Figura supplementare: Drawdown analysis -----
@@ -684,7 +691,7 @@ def visualize_results(results, benchmark_results, output_dir):
         plt.xticks(rotation=45)
         
         plt.tight_layout()
-        plt.savefig(f'{output_dir}/drawdown_analysis.png')
+        plt.savefig(f'{output_dir}\\drawdown_analysis.png')
         plt.close()
     
     # ----- Figura supplementare: Metriche comparative -----
@@ -737,10 +744,27 @@ def visualize_results(results, benchmark_results, output_dir):
     plt.grid(axis='y', alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig(f'{output_dir}/comparative_metrics.png')
+    plt.savefig(f'{output_dir}\\comparative_metrics.png')
     plt.close()
     
     return corr_matrix, returns_df
+def convert_numpy_types(obj):
+        """
+        Converte ricorsivamente i tipi NumPy in tipi Python standard per serializzazione JSON.
+        """
+        if isinstance(obj, (np.integer, np.int64)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float64)):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, (np.datetime64, pd.Timestamp)):
+            return str(obj)
+        elif isinstance(obj, dict):
+            return {key: convert_numpy_types(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_numpy_types(item) for item in obj]
+        return obj
 
 def create_summary_report(results, benchmark_results, corr_matrix, returns_df, output_dir):
     """Crea un report di riepilogo in formato HTML."""
@@ -750,7 +774,7 @@ def create_summary_report(results, benchmark_results, corr_matrix, returns_df, o
     summary = {
         'date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'initial_capital': 100000,
-        'test_period': f"{results['dates'][0].strftime('%Y-%m-%d')} - {results['dates'][-1].strftime('%Y-%m-%d')}",
+        'test_period': f"{pd.Timestamp(results['dates'][0]).strftime('%Y-%m-%d')} - {pd.Timestamp(results['dates'][-1]).strftime('%Y-%m-%d')}",
         'n_trading_days': len(results['dates']),
         'portfolio_model': {
             'final_value': results['portfolio_values'][-1],
@@ -971,16 +995,18 @@ def create_summary_report(results, benchmark_results, corr_matrix, returns_df, o
     """
     
     # Salva report HTML
-    with open(f'{output_dir}/evaluation_report.html', 'w') as f:
+    with open(f'{output_dir}\\evaluation_report.html', 'w') as f:
         f.write(html_content)
     
-    print(f"Report di valutazione salvato in: {output_dir}/evaluation_report.html")
+    print(f"Report di valutazione salvato in: {output_dir}\\evaluation_report.html")
     
+    summary_converted = convert_numpy_types(summary)
+
     # Salva anche le metriche in formato JSON per usi futuri
-    with open(f'{output_dir}/evaluation_metrics.json', 'w') as f:
-        json.dump(summary, f, indent=4)
+    with open(f'{output_dir}\\evaluation_metrics.json', 'w') as f:
+        json.dump(summary_converted, f, indent=4)
     
-    print(f"Metriche di valutazione salvate in: {output_dir}/evaluation_metrics.json")
+    print(f"Metriche di valutazione salvate in: {output_dir}\\evaluation_metrics.json")
 
 def main():
     """Funzione principale per la valutazione del portafoglio."""
@@ -1018,18 +1044,26 @@ def main():
     
     # 5. Cerca e carica il modello migliore
     best_model_file = None
-    model_files = [f for f in os.listdir(f'{OUTPUT_DIR}/weights/') if f.startswith('portfolio_actor_') and f.endswith('.pth')]
+    model_files = [f for f in os.listdir(f'{OUTPUT_DIR}\\weights\\') if f.startswith('portfolio_actor_') and f.endswith('.pth')]
     
     if not model_files:
         print("Nessun modello trovato. Uscita.")
         return
     
     # Ordina per episodio e prendi l'ultimo (o quello specificato)
-    model_files.sort(key=lambda x: int(x.split('_')[-1].split('.')[0]))
+    # Filtra solo i file numerici, escludendo 'initial'
+    numeric_models = [f for f in model_files if f.split('_')[-1].split('.')[0].isdigit()]
+    if numeric_models:
+    # Ordina per numero di episodio
+        numeric_models.sort(key=lambda x: int(x.split('_')[-1].split('.')[0]))
+        best_model_file = numeric_models[-1]  # Usa l'ultimo modello numerico
+    else:
+        # Se non ci sono modelli numerici, usa initial o il primo disponibile
+        best_model_file = next((f for f in model_files if 'initial' in f), model_files[0])
+
     best_model_file = model_files[-1]  # Default: usa l'ultimo modello
-    
     print(f"Utilizzo del modello: {best_model_file}")
-    best_model_path = f'{OUTPUT_DIR}/weights/{best_model_file}'
+    best_model_path = f'{OUTPUT_DIR}\\weights\\{best_model_file}'
     
     # 6. Inizializza l'agente con il modello
     print("Inizializzazione dell'agente...")
@@ -1049,6 +1083,7 @@ def main():
     
     # 10. Crea report di riepilogo
     print("Creazione report di valutazione...")
+
     create_summary_report(results, benchmark_results, corr_matrix, returns_df, EVALUATION_DIR)
     
     print(f"Valutazione completata. Risultati salvati in: {EVALUATION_DIR}")

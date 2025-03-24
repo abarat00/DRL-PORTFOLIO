@@ -187,10 +187,8 @@ class AssetEncoder(nn.Module):
     """
     Modulo opzionale per codificare le feature di ciascun asset in modo indipendente.
     Questo permette di processare ogni asset con gli stessi pesi prima di combinarli.
-    
-    Utile per portafogli con molti asset dove il numero di parametri totali crescerebbe troppo.
     """
-    def __init__(self, features_per_asset, encoding_size=16, seed=0):
+    def __init__(self, features_per_asset, encoding_size=16, seed=0, output_size=None):
         """
         Inizializza il codificatore di asset.
         
@@ -198,15 +196,17 @@ class AssetEncoder(nn.Module):
         - features_per_asset: numero di feature per singolo asset
         - encoding_size: dimensione dell'encoding per asset
         - seed: seme per riproducibilità
+        - output_size: dimensione di output opzionale (diversa da encoding_size)
         """
         super(AssetEncoder, self).__init__()
         self.seed = torch.manual_seed(seed)
         self.features_per_asset = features_per_asset
         self.encoding_size = encoding_size
+        self.output_size = output_size or encoding_size  # Usa output_size se specificato
         
         # Layer di encoding
         self.fc1 = nn.Linear(features_per_asset, 32)
-        self.fc2 = nn.Linear(32, encoding_size)
+        self.fc2 = nn.Linear(32, self.output_size)
         
         # Inizializza i parametri
         self.reset_parameters()
@@ -259,7 +259,8 @@ class EnhancedPortfolioActor(nn.Module):
     Adatta per portafogli con molti asset e relazioni complesse.
     """
     def __init__(self, state_size, action_size, features_per_asset, seed=0, 
-             fc1_units=256, fc2_units=128, encoding_size=16, use_attention=True):
+             fc1_units=256, fc2_units=128, encoding_size=16, use_attention=True,
+             attention_size=None, encoder_output_size=None):
         """
         Inizializza l'Actor avanzato.
         
@@ -267,36 +268,40 @@ class EnhancedPortfolioActor(nn.Module):
         - state_size: dimensione dello stato completo
         - action_size: numero di asset nel portafoglio
         - features_per_asset: feature per singolo asset
-        - seed: seme per riproducibilità
-        - fc1_units, fc2_units: dimensioni dei layer nascosti
         - encoding_size: dimensione dell'encoding per asset
-        - use_attention: se utilizzare meccanismi di attenzione
+        - attention_size: dimensione opzionale per il layer di attenzione
+        - encoder_output_size: dimensione di output opzionale per l'encoder
         """
         super(EnhancedPortfolioActor, self).__init__()
         self.seed = torch.manual_seed(seed)
         self.action_size = action_size
         self.features_per_asset = features_per_asset
-        self.encoding_size = encoding_size
+        
+        # Dimensioni speciali per ripristino da checkpoint
+        attention_dim = attention_size or encoding_size
         
         # Encoder per asset
-        self.asset_encoder = AssetEncoder(features_per_asset, encoding_size, seed)
+        self.asset_encoder = AssetEncoder(
+            features_per_asset, 
+            encoding_size=encoding_size, 
+            seed=seed,
+            output_size=encoder_output_size
+        )
         
-        # Extra feature (posizioni attuali + metriche portafoglio)
+        # Determina le dimensioni reali in uso
+        real_encoding_size = encoder_output_size or encoding_size
+        
+        # Extra feature (posizioni attuali + metriche di portfolio)
         extra_features = state_size - (features_per_asset * action_size)
         
-        # Calcola dimensione dell'input per FC1, considerando l'effetto dell'attenzione
+        # Se attenzione è abilitata, calcola dimensione considerando contesto
         if use_attention:
-            # Quando si usa l'attenzione, ogni asset avrà le sue feature originali + il contesto
-            encoded_size = (action_size * encoding_size * 2) + extra_features
+            # Quando l'output contiene contesto per ogni asset
+            encoded_size = (action_size * attention_dim * 2) + extra_features
         else:
-            encoded_size = (action_size * encoding_size) + extra_features
+            encoded_size = (action_size * real_encoding_size) + extra_features
         
-        #print(f"DEBUG - EnhancedPortfolioActor init:")
-        #print(f"  state_size: {state_size}, action_size: {action_size}, features_per_asset: {features_per_asset}")
-        #print(f"  extra_features: {extra_features}, encoding_size: {encoding_size}")
-        #print(f"  encoded_size (input per FC1): {encoded_size}")
-        
-        # Layer principali
+        # Layer principali con dimensioni calcolate dinamicamente
         self.fc1 = nn.Linear(encoded_size, fc1_units)
         self.fc2 = nn.Linear(fc1_units, fc2_units)
         self.fc3 = nn.Linear(fc2_units, action_size)
@@ -304,8 +309,8 @@ class EnhancedPortfolioActor(nn.Module):
         # Layer di attenzione per modellare relazioni tra asset
         self.use_attention = use_attention
         if use_attention:
-            self.attention = nn.Linear(encoding_size, 1)
-            self.value = nn.Linear(encoding_size, encoding_size)
+            self.attention = nn.Linear(real_encoding_size, 1)
+            self.value = nn.Linear(real_encoding_size, attention_dim)
         
         # Batch normalization
         self.bn1 = nn.BatchNorm1d(fc1_units)
